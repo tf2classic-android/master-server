@@ -12,7 +12,7 @@ from ipaddress import ip_address, ip_network
 
 from server_entry import ServerEntry
 from protocol import MasterProtocol
-import ipfilter
+#import ipfilter
 
 LOG_FILENAME = 'pymaster.log'
 MAX_SERVERS_FOR_IP = 14
@@ -76,11 +76,12 @@ class PyMaster:
 
 	def serverLoop(self):
 		data, addr = self.sock.recvfrom(1024)
+		if addr[0] == '80.76.43.95': return
 
-		if ip_address(addr[0]) in ipfilter.ipfilter:
-			if not self.ipfilterRL.ratelimit(addr[0]):
-				log('Filter: %s:%d' % (addr[0], addr[1]))
-			return
+#		if ip_address(addr[0]) in ipfilter.ipfilter:
+#			if not self.ipfilterRL.ratelimit(addr[0]):
+#				log('Filter: %s:%d' % (addr[0], addr[1]))
+#			return
 
 		if len(data) == 0:
 			return
@@ -104,63 +105,28 @@ class PyMaster:
 
 	def clientQuery(self, data, addr):
 		data = data.decode('latin_1')
-		data = data.strip('1' + data[1])
-		info = data.split('\0')[1].strip('\\')
-		split = info.split('\\')
-
-		protocol = None
-		gamedir  = 'valve'
-		clver    = None
-		nat      = 0
-
-		for i in range(0, len(split), 2):
-			try:
-				k = split[i]
-				v = split[i + 1]
-				if k == 'gamedir':
-					gamedir = v.lower() # keep gamedir in lowercase
-				elif k == 'nat':
-					nat = int(v)
-				elif k == 'clver':
-					clver = v
-				elif k == 'protocol':
-					protocol = int(v)
-				# somebody is playing :)
-				elif k == 'thisismypcid' or k == 'heydevelopersifyoureadthis':
-					self.fakeInfoForOldVersions(gamedir, addr)
-					return
-				else:
-					log('Client Query: %s:%d, invalid infostring=%s' % (addr[0], addr[1], rawFilter))
-			except IndexError:
-				pass
-
-		if( clver == None ): # Probably an old vulnerable version
-			self.fakeInfoForOldVersions(gamedir, addr)
-			return
+		data = data.strip('1')
+		gamedir = data.split('\0')[0]
 
 		packet = MasterProtocol.queryPacketHeader
 		for i in self.serverList:
 			if time() > i.die:
+				print('removeServerFromList %s:%d'%(addr[0], addr[1]))
 				self.serverList.remove(i)
 				continue
 
 			if not i.check:
 				continue
 
-			if nat != i.nat or gamedir != i.gamedir:
+			if gamedir != i.gamedir:
 				continue
 
-			if protocol != None and protocol != i.protocol:
-				continue
-
-			if nat:
-				# Tell server to send info reply
-				data = ('\xff\xff\xff\xffc %s:%d' % (addr[0], addr[1])).encode('latin_1')
-				self.sock.sendto(data, i.addr)
-
+			print('bruh', i.queryAddr)
 			# Use pregenerated address string
 			packet += i.queryAddr
+
 		packet += b'\0\0\0\0\0\0' # Fill last IP:Port with \0
+		print("sendto", packet)
 		self.sock.sendto(packet, addr)
 
 	def fakeInfoForOldVersions(self, gamedir, addr):
@@ -178,10 +144,16 @@ class PyMaster:
 		sendFakeInfo(self.sock, "GooglePlay или GitHub", gamedir, addr)
 
 	def removeServerFromList(self, data, addr):
-		pass
+		for i in self.serverList:
+			if addr[0] != i.addr[0]:
+				continue
+			if addr[1] == i.addr[1]:
+				print('removeServerFromList %s:%d'%(addr[0], addr[1]))
+				break
 
 	def sendChallengeToServer(self, data, addr):
 		count = 0
+
 		s = None
 		for i in self.serverList:
 			if addr[0] != i.addr[0]:
@@ -195,12 +167,14 @@ class PyMaster:
 					return
 
 		challenge2 = None
-		if len(data) == 6:
+		if len(data) == 5:
 			# little endian challenge
-			challenge2 = unpack('<I', data[2:])[0]
+			challenge2 = unpack('<I', data[1:])[0]
 
 		if not s:
 			challenge = random.randint(0, 2**32-1) & 0xffffffff #hash(addr[0]) + hash(addr[1]) + hash(time())
+
+			log('Add server: %s:%d' % (addr[0], addr[1]))
 			s = ServerEntry(addr, challenge)
 			self.serverList.append(s)
 		elif s.sentChallengeAt + 5 > time():
@@ -216,9 +190,6 @@ class PyMaster:
 		self.sock.sendto(packet, addr)
 
 	def addServerToList(self, data, addr):
-		# Remove the header. Just for better parsing.
-		info = data.strip(b'\x30\x0a\x5c').decode('latin_1')
-
 		# Find a server with same address
 		s = None
 		for s in self.serverList:
@@ -228,8 +199,8 @@ class PyMaster:
 			log('Server skipped challenge request: %s:%d' % (addr[0], addr[1]))
 			return
 
-		if s.setInfoString( info ):
-			log('Add server: %s:%d, game=%s/%s, protocol=%d, players=%d/%d/%d, version=%s' % (addr[0], addr[1], s.gamemap, s.gamedir, s.protocol, s.players, s.bots, s.maxplayers, s.version))
+		if s.setInfoString( data[1:] ):
+			log('Heartbeat server: %s:%d, game=%s, protocol=%d' % (addr[0], addr[1], s.gamedir, s.protocol))
 		else:
 			log('Failed challenge from %s:%d: %d must be %d' % (addr[0], addr[1], s.challenge, s.challenge2))
 
